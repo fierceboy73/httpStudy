@@ -6,7 +6,12 @@ export default function App() {
   const [socket, setSocket] = useState(null);
 
   useEffect(() => {
-    const ws = new WebSocket("wss://go-backend-dqcl.onrender.com/ws");
+    const backendUrl =
+      import.meta.env.PROD
+        ? "wss://go-backend-dqcl.onrender.com/ws" // продакшен
+        : "ws://localhost:8080/ws"; // локально
+
+    const ws = new WebSocket(backendUrl);
     ws.onopen = () => console.log("✅ WebSocket connected");
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
