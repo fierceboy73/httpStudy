@@ -5,134 +5,145 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-type Submission struct {
-	Digits string `json:"digits"`
-	Time   string `json:"time"`
+type Message struct {
+	Time  string `json:"time"`
+	Value string `json:"value"`
 }
 
 var (
-	submissions []Submission
-	clients     = make(map[*websocket.Conn]bool)
-	mu          sync.Mutex
-	upgrader    = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true }, // разрешаем все источники
+	clients   = make(map[*websocket.Conn]bool)
+	broadcast = make(chan Message)
+	upgrader  = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true },
 	}
+	messages []Message
+	mutex    sync.Mutex
 )
 
-// --- HTTP routes ---
-func main() {
+// ===== Работа с файлом =====
 
-	// Отдаём React-файлы
-	fs := http.FileServer(http.Dir("./frontend/dist"))
-	http.Handle("/", fs)
+func loadMessages() {
+	file, err := os.Open("data.json")
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Println("💾 data.json не найден — создаём новый.")
+			messages = []Message{}
+			return
+		}
+		log.Println("Ошибка чтения data.json:", err)
+		return
+	}
+	defer file.Close()
 
-	// API и WebSocket
-	http.HandleFunc("/api/send", handleSend)
-	http.HandleFunc("/ws", handleWS)
+	err = json.NewDecoder(file).Decode(&messages)
+	if err != nil {
+		log.Println("Ошибка парсинга JSON:", err)
+	}
+	log.Printf("📂 Загружено %d сообщений из data.json\n", len(messages))
+}
 
-	fmt.Println("🚀 Server running on http://localhost:8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+func saveMessages() {
+	file, err := os.Create("data.json")
+	if err != nil {
+		log.Println("Ошибка записи data.json:", err)
+		return
+	}
+	defer file.Close()
+
+	err = json.NewEncoder(file).Encode(messages)
+	if err != nil {
+		log.Println("Ошибка кодирования JSON:", err)
+	}
+}
+
+// ===== Основные обработчики =====
+
+func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("Ошибка WebSocket:", err)
+		return
+	}
+	defer conn.Close()
+
+	mutex.Lock()
+	clients[conn] = true
+
+	// При подключении отправляем все старые сообщения
+	conn.WriteJSON(messages)
+	mutex.Unlock()
+
+	log.Println("🟢 Новый WebSocket клиент подключен")
+
+	for {
+		if _, _, err := conn.NextReader(); err != nil {
+			mutex.Lock()
+			delete(clients, conn)
+			mutex.Unlock()
+			log.Println("🔴 Клиент отключился")
+			break
+		}
+	}
 }
 
 func handleSend(w http.ResponseWriter, r *http.Request) {
-	enableCORS(&w, r)
-
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusOK)
-		return
+	var data struct {
+		Value string `json:"value"`
 	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	var body struct {
-		Digits string `json:"digits"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
+	msg := Message{
+		Time:  time.Now().Format("15:04"),
+		Value: data.Value,
 	}
 
-	mu.Lock()
-	sub := Submission{Digits: body.Digits, Time: time.Now().Format("15:04")}
-	submissions = append(submissions, sub)
-	mu.Unlock()
+	mutex.Lock()
+	messages = append(messages, msg)
+	saveMessages() // сохраняем в файл
+	mutex.Unlock()
 
-	broadcast(sub) // отправляем всем клиентам обновление
-
+	broadcast <- msg
 	w.WriteHeader(http.StatusOK)
 }
 
-func handleList(w http.ResponseWriter, r *http.Request) {
-	enableCORS(&w, r)
+// ===== Поток для рассылки =====
 
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	mu.Lock()
-	defer mu.Unlock()
-	json.NewEncoder(w).Encode(submissions)
-}
-
-// --- WebSocket part ---
-func handleWS(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Println("WebSocket upgrade error:", err)
-		return
-	}
-
-	mu.Lock()
-	clients[conn] = true
-	mu.Unlock()
-
-	log.Println("🟢 New WebSocket client connected")
-
-	// слушаем клиент (чтобы соединение не закрывалось)
-	go func(c *websocket.Conn) {
-		defer func() {
-			mu.Lock()
-			delete(clients, c)
-			mu.Unlock()
-			c.Close()
-			log.Println("🔴 WebSocket client disconnected")
-		}()
-
-		for {
-			// читаем пустые сообщения (чтобы не отваливалось)
-			if _, _, err := c.ReadMessage(); err != nil {
-				break
+func handleMessages() {
+	for {
+		msg := <-broadcast
+		mutex.Lock()
+		for client := range clients {
+			err := client.WriteJSON([]Message{msg})
+			if err != nil {
+				log.Println("Ошибка отправки:", err)
+				client.Close()
+				delete(clients, client)
 			}
 		}
-	}(conn)
-}
-
-func broadcast(sub Submission) {
-	mu.Lock()
-	defer mu.Unlock()
-
-	data, _ := json.Marshal(sub)
-	for c := range clients {
-		err := c.WriteMessage(websocket.TextMessage, data)
-		if err != nil {
-			c.Close()
-			delete(clients, c)
-		}
+		mutex.Unlock()
 	}
 }
 
-func enableCORS(w *http.ResponseWriter, r *http.Request) {
-	(*w).Header().Set("Access-Control-Allow-Origin", "*")
-	(*w).Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	(*w).Header().Set("Access-Control-Allow-Headers", "Content-Type")
+// ===== main =====
+
+func main() {
+	loadMessages() // загружаем историю при старте
+
+	http.HandleFunc("/ws", handleWebSocket)
+	http.HandleFunc("/api/send", handleSend)
+
+	go handleMessages()
+
+	fmt.Println("🚀 Server running on http://localhost:8080")
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
