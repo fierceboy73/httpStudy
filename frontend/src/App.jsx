@@ -6,7 +6,7 @@ export default function App() {
   const [socket, setSocket] = useState(null);
 
   useEffect(() => {
-    const ws = new WebSocket("ws://go-backend-dqcl.onrender.com/ws");
+    const ws = new WebSocket("wss://go-backend-dqcl.onrender.com/ws");
     ws.onopen = () => console.log("✅ WebSocket connected");
     ws.onmessage = (event) => {
       const data = JSON.parse(event.data);
