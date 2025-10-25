@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"sync"
-	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -93,27 +92,31 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func handleSend(w http.ResponseWriter, r *http.Request) {
-	var data struct {
-		Value string `json:"value"`
+func sendHandler(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w)
+	if r.Method == "OPTIONS" {
+		w.WriteHeader(http.StatusOK)
+		return
 	}
-	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+
+	var req struct {
+		Digits string `json:"digits"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	msg := Message{
-		Time:  time.Now().Format("15:04"),
-		Value: data.Value,
-	}
+	log.Println("Получено:", req.Digits)
+	// TODO: добавить сохранение в data.json
 
-	mutex.Lock()
-	messages = append(messages, msg)
-	saveMessages() // сохраняем в файл
-	mutex.Unlock()
-
-	broadcast <- msg
 	w.WriteHeader(http.StatusOK)
+}
+
+func enableCORS(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "https://react-frontend-dq0w.onrender.com")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 }
 
 // ===== Поток для рассылки =====
@@ -140,7 +143,7 @@ func main() {
 	loadMessages() // загружаем историю при старте
 
 	http.HandleFunc("/ws", handleWebSocket)
-	http.HandleFunc("/api/send", handleSend)
+	http.HandleFunc("/api/send", sendHandler)
 
 	go handleMessages()
 
