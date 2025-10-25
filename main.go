@@ -5,93 +5,56 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"sync"
 
 	"github.com/gorilla/websocket"
 )
 
+// Список всех подключенных клиентов
+var clients = make(map[*websocket.Conn]bool)
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		// Разрешаем подключения с фронта
+		return r.Header.Get("Origin") == "https://react-frontend-dq0w.onrender.com" || r.Header.Get("Origin") == "http://localhost:5173"
+	},
+}
+
+// Сообщение, которое рассылается фронту
 type Message struct {
-	Time  string `json:"time"`
-	Value string `json:"value"`
+	Digits string `json:"digits"`
+	Time   string `json:"time"`
 }
 
-var (
-	clients   = make(map[*websocket.Conn]bool)
-	broadcast = make(chan Message)
-	upgrader  = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true },
-	}
-	messages []Message
-	mutex    sync.Mutex
-)
-
-// ===== Работа с файлом =====
-
-func loadMessages() {
-	file, err := os.Open("data.json")
-	if err != nil {
-		if os.IsNotExist(err) {
-			log.Println("💾 data.json не найден — создаём новый.")
-			messages = []Message{}
-			return
-		}
-		log.Println("Ошибка чтения data.json:", err)
-		return
-	}
-	defer file.Close()
-
-	err = json.NewDecoder(file).Decode(&messages)
-	if err != nil {
-		log.Println("Ошибка парсинга JSON:", err)
-	}
-	log.Printf("📂 Загружено %d сообщений из data.json\n", len(messages))
-}
-
-func saveMessages() {
-	file, err := os.Create("data.json")
-	if err != nil {
-		log.Println("Ошибка записи data.json:", err)
-		return
-	}
-	defer file.Close()
-
-	err = json.NewEncoder(file).Encode(messages)
-	if err != nil {
-		log.Println("Ошибка кодирования JSON:", err)
-	}
-}
-
-// ===== Основные обработчики =====
-
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
+// WebSocket handler
+func wsHandler(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w)
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("Ошибка WebSocket:", err)
+		log.Println("Ошибка при апгрейде:", err)
 		return
 	}
 	defer conn.Close()
-
-	mutex.Lock()
 	clients[conn] = true
-
-	// При подключении отправляем все старые сообщения
-	conn.WriteJSON(messages)
-	mutex.Unlock()
-
-	log.Println("🟢 Новый WebSocket клиент подключен")
+	log.Println("🟢 WebSocket клиент подключён")
 
 	for {
+		// Если клиент закрывает соединение
 		if _, _, err := conn.NextReader(); err != nil {
-			mutex.Lock()
+			log.Println("🔴 WebSocket клиент отключён")
 			delete(clients, conn)
-			mutex.Unlock()
-			log.Println("🔴 Клиент отключился")
+			conn.Close()
 			break
 		}
 	}
 }
 
+// CORS
+func enableCORS(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "https://react-frontend-dq0w.onrender.com")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+}
+
+// POST /api/send
 func sendHandler(w http.ResponseWriter, r *http.Request) {
 	enableCORS(w)
 	if r.Method == "OPTIONS" {
@@ -107,46 +70,29 @@ func sendHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Println("Получено:", req.Digits)
-	// TODO: добавить сохранение в data.json
+	// Создаём сообщение для всех клиентов
+	msg := Message{
+		Digits: req.Digits,
+		Time:   fmt.Sprintf("%02d:%02d", r.Context().Value(http.ServerContextKey)),
+	}
+
+	// Рассылаем сообщение всем подключённым клиентам
+	for conn := range clients {
+		if err := conn.WriteJSON(msg); err != nil {
+			log.Println("Ошибка отправки:", err)
+			conn.Close()
+			delete(clients, conn)
+		}
+	}
 
 	w.WriteHeader(http.StatusOK)
+	log.Println("📨 Получено и отправлено:", req.Digits)
 }
-
-func enableCORS(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "https://react-frontend-dq0w.onrender.com")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-}
-
-// ===== Поток для рассылки =====
-
-func handleMessages() {
-	for {
-		msg := <-broadcast
-		mutex.Lock()
-		for client := range clients {
-			err := client.WriteJSON([]Message{msg})
-			if err != nil {
-				log.Println("Ошибка отправки:", err)
-				client.Close()
-				delete(clients, client)
-			}
-		}
-		mutex.Unlock()
-	}
-}
-
-// ===== main =====
 
 func main() {
-	loadMessages() // загружаем историю при старте
-
-	http.HandleFunc("/ws", handleWebSocket)
+	http.HandleFunc("/ws", wsHandler)
 	http.HandleFunc("/api/send", sendHandler)
 
-	go handleMessages()
-
-	fmt.Println("🚀 Server running on http://localhost:8080")
+	log.Println("🚀 Server running on :8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
