@@ -14,9 +14,16 @@ export default function App() {
     const ws = new WebSocket(backendUrl);
     ws.onopen = () => console.log("✅ WebSocket connected");
     ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      setMessages((prev) => [data, ...prev]);
+      try {
+        const data = JSON.parse(event.data);
+        if (data && data.digits && data.time) {
+          setMessages((prev) => [data, ...prev]);
+        }
+      } catch (err) {
+        console.error("Ошибка парсинга сообщения:", err);
+      }
     };
+
     ws.onclose = () => console.log("❌ WebSocket disconnected");
     setSocket(ws);
     return () => ws.close();
@@ -41,11 +48,14 @@ export default function App() {
 
   // Группировка по минутам
   const grouped = messages.reduce((acc, msg) => {
+    if (!msg || !msg.time) return acc; // 👈 защита от пустых сообщений
+
     const minute = msg.time.slice(0, 5);
     if (!acc[minute]) acc[minute] = [];
     acc[minute].push(msg.digits);
     return acc;
   }, {});
+
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-100 to-slate-200 flex flex-col items-center justify-center p-6">
