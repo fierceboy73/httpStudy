@@ -48,6 +48,11 @@ func isAllowedOrigin(origin string) bool {
 	return ok
 }
 
+func dataHandler(w http.ResponseWriter, r *http.Request) {
+	enableCORS(w, r)
+	http.ServeFile(w, r, dataFile)
+}
+
 func enableCORS(w http.ResponseWriter, r *http.Request) {
 	origin := r.Header.Get("Origin")
 	if isAllowedOrigin(origin) {
@@ -217,6 +222,7 @@ func main() {
 
 	http.HandleFunc("/ws", wsHandler)
 	http.HandleFunc("/api/send", sendHandler)
+	http.HandleFunc("/api/data", dataHandler)
 
 	log.Println("server running on :8080")
 	if err := http.ListenAndServe(":8080", nil); err != nil {
